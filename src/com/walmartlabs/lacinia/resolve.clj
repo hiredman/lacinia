@@ -131,69 +131,41 @@
 
 (def ^:private *promise-id-allocator (atom 0))
 
+(extend-type java.util.concurrent.CompletableFuture
+  ResolverResult
+  (on-deliver! [this callback]
+    (if *callback-executor*
+      (.whenCompleteAsync
+       this
+       (reify
+         java.util.function.BiConsumer
+         (accept [_ result exception]
+           (when-not exception
+             (callback result))))
+       *callback-executor*)
+      (.whenCompleteAsync
+       this
+       (reify
+         java.util.function.BiConsumer
+         (accept [_ result exception]
+           (when-not exception
+             (callback result))))))
+    this)
+  ResolverResultPromise
+  (deliver!
+    ([this resolved-value]
+     (when-not (.complete this resolved-value)
+       (throw (IllegalStateException. "May only realize a ResolverResultPromise once.")))
+     this)
+    ([this resolved-value error]
+     (deliver! this (with-error resolved-value error)))))
+
 (defn resolve-promise
   "Returns a [[ResolverResultPromise]].
 
    A value must be resolved and ultimately provided via [[deliver!]]."
   []
-  (let [*state (atom {})
-        promise-id (swap! *promise-id-allocator inc)]
-    (reify
-      ResolverResult
-
-      (on-deliver! [this callback]
-        (loop []
-          (let [state @*state]
-            (cond
-              (contains? state :resolved-value)
-              (callback (:resolved-value state))
-
-              (contains? state :callback)
-              (throw (IllegalStateException. "ResolverResultPromise callback may only be set once."))
-
-              (compare-and-set! *state state (assoc state :callback callback))
-              nil
-
-              :else
-              (recur))))
-
-        this)
-
-      ResolverResultPromise
-
-      (deliver! [this resolved-value]
-        (loop []
-          (let [state @*state]
-            (when (contains? state :resolved-value)
-              (throw (IllegalStateException. "May only realize a ResolverResultPromise once.")))
-
-            (if (compare-and-set! *state state (assoc state :resolved-value resolved-value))
-              (when-let [callback (:callback state)]
-                (let [^Executor executor *callback-executor*]
-                  (if (or (nil? executor)
-                          *in-callback-thread*)
-                    (callback resolved-value)
-                    (.execute executor #(binding [*in-callback-thread* true]
-                                          (callback resolved-value))))))
-              (recur))))
-
-        this)
-
-      (deliver! [this resolved-value error]
-        (deliver! this (with-error resolved-value error)))
-
-      Object
-
-      (toString [_]
-        (str "ResolverResultPromise[" promise-id
-
-             (when (contains? @*state :callback)
-               ", callback")
-
-             (when (contains? @*state :resolved-value)
-               ", resolved")
-
-             "]")))))
+  (java.util.concurrent.CompletableFuture.))
 
 (defn is-resolver-result?
   "Is the provided value actually a [[ResolverResult]]?"
